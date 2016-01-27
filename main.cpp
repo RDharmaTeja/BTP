@@ -13,17 +13,6 @@
 #include <string>
 #include <sstream>
 
-/* patch to make to_string work */
-namespace patch
-{
-template < typename T > std::string to_string( const T& n )
-{
-    std::ostringstream stm ;
-    stm << n ;
-    return stm.str() ;
-}
-}
-
 #define dataType long double
 #define mpiDType MPI::LONG_DOUBLE
 #define mpiInt MPI::INT
@@ -32,10 +21,40 @@ template < typename T > std::string to_string( const T& n )
 #define mpiISend MPI::COMM_WORLD.Irecv
 #define mpiIRecv MPI::COMM_WORLD.Isend
 
+
+namespace patch
+{
+/* patch to make to_string work */
+template < typename T > std::string to_string( const T& n )
+{
+    std::ostringstream stm ;
+    stm << n ;
+    return stm.str() ;
+}
+}
+
+/*supports for vanleer scheme*/
+namespace vanleer
+{
+/*supports for vanleer scheme*/
+
+/// Defining alpha +
+double alp(double M)
+{
+    if (M > 0)
+        return(1);
+    return(0);
+}
+
+int sign(double x)
+{
+   return (x>0)- (x<0);
+}
+
+}
+
+
 using namespace std;
-
-
-
 /******************** supports start************************/
 struct  flow_variables
 {
@@ -103,20 +122,21 @@ public:
     3. Set_ranks()
     4. Set_indexes()
     5. Run_vanleer()
+    6. Write_coord()
     */
 };
 
 void domain::Run_vanleer()
 {
     /// vanleer scheme
-    int imx = width, jmx = height;
+    int imx = width, jmx = height; // imax and jmax of entire flow domain
 
     /******************storing coordinates and computing areas, normals, volume start*********************/
     dataType x_cord[imx][jmx],y_cord[imx][jmx];//x and y coordinates of grid
-    dataType Iar[imx][jmx],Jar[imx][jmx];//i-face and j-face areas
-    dataType In[imx][jmx][2],Jn[imx][jmx][2],l;// i,j face normals
+    dataType Iar[imx][jmx-1],Jar[imx-1][jmx];//i-face and j-face areas
+    dataType In[imx][jmx-1][2],Jn[imx-1][jmx][2],l;// i,j face normals
     dataType Vol[imx][jmx],lo,up;// volume of cells
-    /// Storing the coordinates
+    /// Storing the coordinates of entire domain
     int buf =0;
     for(int j=0 ; j<jmx ; j++)
     {
@@ -127,12 +147,31 @@ void domain::Run_vanleer()
             buf++;
         }
     }
+    /// getting coordinates of process domain
+    /*
+    imx = grid_top.x-grid_bottom.x+1;
+    jmx = grid_top.y-grid_bottom.y+1;
+    dataType x_cord2[imx][jmx],y_cord2[imx][jmx];
+    dataType Iar[imx][jmx],Jar[imx][jmx];//i-face and j-face areas
+    dataType In[imx][jmx][2],Jn[imx][jmx][2],l;// i,j face normals
+    dataType Vol[imx][jmx],lo,up;// volume of cells
+
+    for(int j = grid_bottom.y; j <= grid_top.y; j++)
+    {
+        for(int i = grid_bottom.x; i <= grid_top.x; i++)
+        {
+            //coord << x_cord[i][j] << " " << y_cord[i][j] << "\n";
+            x_cord2[i-grid_bottom.x][j-grid_bottom.y] = x_cord[i][j];
+            y_cord2[i-grid_bottom.x][j-grid_bottom.y] = y_cord[i][j];
+        }
+    }
+    */
     /// Calculating i face areas
     for(int j=0; j<jmx-1; j++)
     {
         for(int i=0; i<imx; i++)
         {
-            Iar[i][j+1] = sqrt(pow((x_cord[i][j+1] - x_cord[i][j]),2)+ pow((y_cord[i][j+1] - y_cord[i][j]),2));
+            Iar[i][j] = sqrt(pow((x_cord[i][j+1] - x_cord[i][j]),2)+ pow((y_cord[i][j+1] - y_cord[i][j]),2));
         }
     }
 
@@ -141,7 +180,7 @@ void domain::Run_vanleer()
     {
         for(int i=0; i<imx-1; i++)
         {
-            Jar[i+1][j] = sqrt(pow((x_cord[i+1][j] - x_cord[i][j]),2)+ pow((y_cord[i+1][j] - y_cord[i][j]),2));
+            Jar[i][j] = sqrt(pow((x_cord[i+1][j] - x_cord[i][j]),2)+ pow((y_cord[i+1][j] - y_cord[i][j]),2));
         }
     }
     /// Calculating i face normals
@@ -150,8 +189,8 @@ void domain::Run_vanleer()
         for(int i=0; i<imx; i++)
         {
             l = sqrt(pow((x_cord[i][j+1] - x_cord[i][j]),2)+ pow((y_cord[i][j+1] - y_cord[i][j]),2));
-            In[i][j+1][0] = (y_cord[i][j+1] - y_cord[i][j])/l; // x-component of i-face normal
-            In[i][j+1][1] = (-x_cord[i][j+1] + x_cord[i][j])/l; // y-component of i-face normal
+            In[i][j][0] = (y_cord[i][j+1] - y_cord[i][j])/l; // x-component of i-face normal
+            In[i][j][1] = (-x_cord[i][j+1] + x_cord[i][j])/l; // y-component of i-face normal
         }
     }
 
@@ -161,8 +200,8 @@ void domain::Run_vanleer()
         for(int i=0; i<imx-1; i++)
         {
             l = sqrt(pow((x_cord[i+1][j] - x_cord[i][j]),2) + pow((y_cord[i+1][j] - y_cord[i][j]),2))	;
-            Jn[i+1][j][0] = (-y_cord[i+1][j] + y_cord[i][j])/l; // x-component of j-face normal
-            Jn[i+1][j][1] = (x_cord[i+1][j] - x_cord[i][j])/l; // y-component of j-face normal
+            Jn[i][j][0] = (-y_cord[i+1][j] + y_cord[i][j])/l; // x-component of j-face normal
+            Jn[i][j][1] = (x_cord[i+1][j] - x_cord[i][j])/l; // y-component of j-face normal
         }
     }
     /// Calculating cell volumes
@@ -182,6 +221,204 @@ void domain::Run_vanleer()
     dataType pInf = in_flow.press,dInf = in_flow.dens, tInf = in_flow.temp;
     dataType r = in_flow.r, R = in_flow.R;
     dataType mInf = in_flow.mach,uInf = in_flow.u,vInf = in_flow.v,wInf = in_flow.w;
+    /// primitive and Characteristic variables decleration
+    int imax= grid_top.x-grid_bottom.x+1, jmax = grid_top.y-grid_bottom.y+1; // imax and jmax of current domain
+    //cout << imax << " "<<jmax << endl;
+    dataType q[imax+1][jmax+1][4]; // primitive, size includes ghost cells for boundary,in-outflow, interface
+    dataType U[imax+1][jmax+1][4]; // characteristic
+    /// initializing to inflow conditions
+    for(int i =0; i < imax+1; i++)
+    {
+        for(int j =0; j< jmax+1; j++)
+        {
+            q[i][j][0] = pInf;
+            q[i][j][1] = uInf;
+            q[i][j][2] = vInf;
+            q[i][j][3] = dInf;
+            U[i][j][0] = dInf;
+            U[i][j][1] = dInf*uInf;
+            U[i][j][2] = dInf*vInf;
+            U[i][j][3] = pInf/(r-1) + 0.5*dInf*(uInf*uInf + vInf*vInf);
+        }
+    }
+    /****************************apply b.c. outsite main loop - starts***********************************/
+    /// left face - can be inflow or interface(no need to impose any conditions)
+    if(left_rank == -2)
+    {
+        /// subsonic
+        if(mInf < 1)
+        {
+            for(int j =0; j< jmax+1; j++)
+            {
+                q[0][j][0] = q[1][j][0];// pressure is imposed from right
+            }
+        }
+        /// supersonic - implicitly satisfied as everything is initialized to infi values
+    }
+    /// top face - can be boundary or interface
+    if(top_rank == -1)
+    {
+        for(int i =0; i < imax+1; i++)
+        {
+            q[i][jmax][0] =  q[i][jmax-1][0];// pressure
+            q[i][jmax][3] =  q[i][jmax-1][3];// density
+        }
+
+    }
+
+    /// right face - can be outflow or interface
+    if(right_rank == -3)
+    {
+        /*
+        if(mInf < 1)
+        {
+            for(int j=0; j<jmax+1; j++)
+            {
+            }
+
+        }
+        */
+    }
+    /// bottom face - can be boundary or interface
+    if(bottom_rank == -1)
+    {
+        for(int i =0; i < imax+1; i++)
+        {
+            q[i][0][0] =  q[i][1][0];// pressure
+            q[i][0][3] =  q[i][1][3];// density
+        }
+    }
+    /****************************apply b.c. outsite main loop - ends***********************************/
+
+    /**************************************main iteration loop - starts ***************************/
+    /// switch variable
+    dataType mp1[imax][jmax-1],mm1[imax][jmax-1],mp2[imax-1][jmax],mm2[imax-1][jmax];//mach + ,-
+    dataType ap1[imax][jmax-1],am1[imax][jmax-1],ap2[imax-1][jmax],am2[imax-1][jmax];//alpha + ,-
+    dataType bp1[imax][jmax-1],bm1[imax][jmax-1],bp2[imax-1][jmax],bm2[imax-1][jmax];//beta + ,-
+    dataType cp1[imax][jmax-1],cm1[imax][jmax-1],cp2[imax-1][jmax],cm2[imax-1][jmax];//cvl + ,-
+    dataType dp1[imax][jmax-1],dm1[imax][jmax-1],dp2[imax-1][jmax],dm2[imax-1][jmax];//d + ,-
+    dataType a[imax+1][jmax+1];// sound speed
+    /// fluxes
+    dataType F[imax][jmax-1][4],G[imax-1][jmax][4];
+    int iters = 0;
+    while(++iters <= 1)
+    {
+        ///cout << "teja" << endl;
+        /// sound speed
+        for(int i =0; i< imax+1; i++)
+        {
+            for(int j =0; j< jmax+1; j++)
+            {
+                ///a(1:imax+1,1:jmax+1) = (sqrt(rair*q(1:imax+1,1:jmax+1,1)./q(1:imax+1,1:jmax+1,4))); % sound speeds
+                a[i][j] = sqrt(r*q[i][j][0]/q[i][j][3]);
+        }
+        }
+        cout << dInf << endl;
+        /// mach, alpha , beta, c, d for i faces
+        int offset_i, offset_j;
+        for(int j =0; j< jmax-1; j++)
+        {
+            for(int i =0; i< imax; i++ )
+            {
+                offset_i = i+grid_bottom.x;
+                offset_j = j+grid_bottom.y;
+                mp1[i][j] = (q[i][j+1][1]*In[offset_i][offset_j][0] + q[i][j+1][2]*In[offset_i][offset_j][1])/(0.5*(a[i][j+1]+a[i+1][j+1]));
+                mm1[i][j] = (q[i+1][j+1][1]*In[offset_i][offset_j][0] + q[i+1][j+1][2]*In[offset_i][offset_j][1])/(0.5*(a[i][j+1]+a[i+1][j+1]));
+                bp1[i][j] = std::min(0,vanleer::sign(std::abs(mp1[i][j])-1));
+                bm1[i][j] = std::min(0,vanleer::sign(std::abs(mm1[i][j])-1));
+                ap1[i][j] = 0.5*(1+vanleer::sign(mp1[i][j]));
+                am1[i][j] = 0.5*(1-vanleer::sign(mm1[i][j]));
+                ///cp1 =ap1.*(1+bp1).*mp1 - 0.25*bp1.*((1+mp1).^2);
+                ///cm1 =am1.*(1+bm1).*mm1 + 0.25*bm1.*((1-mm1).^2);
+                cp1[i][j] = ap1[i][j]*(1+bp1[i][j])*mp1[i][j] - 0.25*bp1[i][j]*(1+mp1[i][j])*(1+mp1[i][j]);
+                cm1[i][j] = am1[i][j]*(1+bm1[i][j])*mm1[i][j] + 0.25*bm1[i][j]*(1-mm1[i][j])*(1-mm1[i][j]);
+                /// dp1 =ap1.*(1+bp1)-0.25*bp1.*((1+mp1).^2).*(2-mp1);
+                ///dm1 =am1.*(1+bm1)-0.25*bm1.*((1-mm1).^2).*(2+mm1);
+                dp1[i][j] = ap1[i][j]*(1+bp1[i][j]) - 0.25*bp1[i][j]*(1+mp1[i][j])*(1+mp1[i][j])*(2-mp1[i][j]);
+                dm1[i][j] = am1[i][j]*(1+bm1[i][j]) - 0.25*bm1[i][j]*(1-mm1[i][j])*(1-mm1[i][j])*(2+mm1[i][j]);
+            }
+        }
+
+        /// mach, alpha , beta, c, d for j faces
+        for(int j =0; j< jmax; j++)
+        {
+            for(int i =0; i< imax-1; i++ )
+            {
+                offset_i = i+grid_bottom.x;
+                offset_j = j+grid_bottom.y;
+                mp2[i][j] = (q[i+1][j][1]*Jn[offset_i][offset_j][0] + q[i+1][j][2]*Jn[offset_i][offset_j][1])/(0.5*(a[i+1][j]+a[i+1][j+1]));
+                mm2[i][j] = (q[i+1][j+1][1]*Jn[offset_i][offset_j][0] + q[i+1][j+1][2]*Jn[offset_i][offset_j][1])/(0.5*(a[i+1][j]+a[i+1][j+1]));
+                bp2[i][j] = std::min(0,vanleer::sign(std::abs(mp2[i][j])-1));
+                bm2[i][j] = std::min(0,vanleer::sign(std::abs(mm2[i][j])-1));
+                ap2[i][j] = 0.5*(1+vanleer::sign(mp2[i][j]));
+                am2[i][j] = 0.5*(1-vanleer::sign(mm2[i][j]));
+                ///cp1 =ap1.*(1+bp1).*mp1 - 0.25*bp1.*((1+mp1).^2);
+                ///cm1 =am1.*(1+bm1).*mm1 + 0.25*bm1.*((1-mm1).^2);
+                cp2[i][j] = ap2[i][j]*(1+bp2[i][j])*mp2[i][j] - 0.25*bp2[i][j]*(1+mp2[i][j])*(1+mp2[i][j]);
+                cm2[i][j] = am2[i][j]*(1+bm2[i][j])*mm2[i][j] + 0.25*bm2[i][j]*(1-mm2[i][j])*(1-mm2[i][j]);
+                /// dp1 =ap1.*(1+bp1)-0.25*bp1.*((1+mp1).^2).*(2-mp1);
+                ///dm1 =am1.*(1+bm1)-0.25*bm1.*((1-mm1).^2).*(2+mm1);
+                dp2[i][j] = ap2[i][j]*(1+bp2[i][j]) - 0.25*bp2[i][j]*(1+mp2[i][j])*(1+mp2[i][j])*(2-mp2[i][j]);
+                dm2[i][j] = am2[i][j]*(1+bm2[i][j]) - 0.25*bm2[i][j]*(1-mm2[i][j])*(1-mm2[i][j])*(2+mm2[i][j]);
+
+            }
+        }
+
+        /// F fluxes
+        for(int j=0; j<jmax-1; j++)
+        {
+            for(int i =0; i< imax; i++)
+            {
+
+                offset_i = i+grid_bottom.x;
+                offset_j = j+grid_bottom.y;
+                /*
+                    fFlux1(1:imax,1:jmax-1,1) = (q(1:imax,2:jmax,4).*a(1:imax,2:jmax).*cp1 + q(2:imax+1,2:jmax,4).*a(2:imax+1,2:jmax).*cm1).*xareamag;
+                fFlux1(1:imax,1:jmax-1,2) = (U(1:imax,2:jmax,2).*a(1:imax,2:jmax).*cp1 + U(2:imax+1,2:jmax,2).*a(2:imax+1,2:jmax).*cm1 + (dp1.*q(1:imax,2:jmax,1)+dm1.*q(2:imax+1,2:jmax,1)).*xarean(:,:,1)).*xareamag;
+                fFlux1(1:imax,1:jmax-1,3) = (U(1:imax,2:jmax,3).*a(1:imax,2:jmax).*cp1 + U(2:imax+1,2:jmax,3).*a(2:imax+1,2:jmax).*cm1 + (dp1.*q(1:imax,2:jmax,1)+dm1.*q(2:imax+1,2:jmax,1)).*xarean(:,:,2)).*xareamag;
+                fFlux1(1:imax,1:jmax-1,4) = (q(1:imax,2:jmax,4).*a(1:imax,2:jmax).*cp1.*(3.5*q(1:imax,2:jmax,1)./q(1:imax,2:jmax,4)+0.5*(q(1:imax,2:jmax,2).^2+q(1:imax,2:jmax,3).^2))...
+                 + q(2:imax+1,2:jmax,4).*a(2:imax+1,2:jmax).*cm1.*(3.5*q(2:imax+1,2:jmax,1)./q(2:imax+1,2:jmax,4)+0.5*(q(2:imax+1,2:jmax,2).^2+q(2:imax+1,2:jmax,3).^2))).*xareamag;
+                */
+                F[i][j][0] = (q[i][j+1][3]*a[i][j+1]*cp1[i][j] + q[i+1][j+1][3]*a[i+1][j+1]*cm1[i][j])*Iar[offset_i][offset_j];
+                F[i][j][1] = (q[i][j+1][3]*q[i][j+1][1]*a[i][j+1]*cp1[i][j] + q[i+1][j+1][3]*q[i+1][j+1][1]*a[i+1][j+1]*cm1[i][j] +
+                (dp1[i][j]*q[i][j+1][0] + dm1[i][j]*q[i+1][j+1][0])*In[offset_i][offset_j][0])*Iar[offset_i][offset_j];
+                F[i][j][2] = (q[i][j+1][3]*q[i][j+1][2]*a[i][j+1]*cp1[i][j] + q[i+1][j+1][3]*q[i+1][j+1][2]*a[i+1][j+1]*cm1[i][j] +
+                (dp1[i][j]*q[i][j+1][0] + dm1[i][j]*q[i+1][j+1][0])*In[offset_i][offset_j][1])*Iar[offset_i][offset_j];
+                F[i][j][3] = (q[i][j+1][3]*a[i][j+1]*cp1[i][j]*(3.5*q[i][j+1][0]/q[i][j+1][3] + 0.5*(q[i][j+1][1]*q[i][j+1][1] + q[i][j+1][2]*q[i][j+1][2])) +
+                q[i+1][j+1][3]*a[i+1][j+1]*cm1[i][j]*(3.5*q[i+1][j+1][0]/q[i+1][j+1][3] + 0.5*(q[i+1][j+1][1]*q[i+1][j+1][1] + q[i+1][j+1][2]*q[i+1][j+1][2])))*Iar[offset_i][offset_j];
+            }
+
+        }
+        /// G fluxes
+        for(int j=0; j<jmax; j++)
+        {
+            for(int i =0; i< imax-1; i++)
+            {
+
+                offset_i = i+grid_bottom.x;
+                offset_j = j+grid_bottom.y;
+                /*
+                    gFlux1(1:imax-1,1:jmax,1) = (q(2:imax,1:jmax,4).*a(2:imax,1:jmax).*cp2 + q(2:imax,2:jmax+1,4).*a(2:imax,2:jmax+1).*cm2).*yareamag;
+                gFlux1(1:imax-1,1:jmax,2) = (U(2:imax,1:jmax,2).*a(2:imax,1:jmax).*cp2 + U(2:imax,2:jmax+1,2).*a(2:imax,2:jmax+1).*cm2 + (dp2.*q(2:imax,1:jmax,1)+dm2.*q(2:imax,2:jmax+1,1)).*yarean(:,:,1)).*yareamag;
+                gFlux1(1:imax-1,1:jmax,3) = (U(2:imax,1:jmax,3).*a(2:imax,1:jmax).*cp2 + U(2:imax,2:jmax+1,3).*a(2:imax,2:jmax+1).*cm2 + (dp2.*q(2:imax,1:jmax,1)+dm2.*q(2:imax,2:jmax+1,1)).*yarean(:,:,2)).*yareamag;
+                gFlux1(1:imax-1,1:jmax,4) = (q(2:imax,1:jmax,4).*a(2:imax,1:jmax).*cp2.*(3.5*q(2:imax,1:jmax,1)./q(2:imax,1:jmax,4)+0.5*(q(2:imax,1:jmax,2).^2+q(2:imax,1:jmax,3).^2))...
+                + q(2:imax,2:jmax+1,4).*a(2:imax,2:jmax+1).*cm2.*(3.5*q(2:imax,2:jmax+1,1)./q(2:imax,2:jmax+1,4)+0.5*(q(2:imax,2:jmax+1,2).^2+q(2:imax,2:jmax+1,3).^2))).*yareamag;
+
+                */
+                G[i][j][0] = (q[i+1][j][3]*a[i+1][j]*cp2[i][j] + q[i+1][j+1][3]*a[i+1][j+1]*cm2[i][j])*Jar[offset_i][offset_j];
+                G[i][j][1] = (q[i+1][j][3]*q[i+1][j][1]*a[i+1][j]*cp2[i][j] + q[i+1][j+1][3]*q[i+1][j+1][1]*a[i+1][j+1]*cm2[i][j] +
+                (dp2[i][j]*q[i+1][j][0] + dm2[i][j]*q[i+1][j+1][0])*Jn[offset_i][offset_j][0])*Jar[offset_i][offset_j];
+                G[i][j][2] = (q[i+1][j][3]*q[i+1][j][2]*a[i+1][j]*cp2[i][j] + q[i+1][j+1][3]*q[i+1][j+1][2]*a[i+1][j+1]*cm2[i][j] +
+                (dp2[i][j]*q[i+1][j][0] + dm2[i][j]*q[i+1][j+1][0])*Jn[offset_i][offset_j][1])*Jar[offset_i][offset_j];
+                G[i][j][3] = (q[i+1][j][3]*a[i+1][j]*cp2[i][j]*(3.5*q[i+1][j][0]/q[i+1][j][3] + 0.5*(q[i+1][j][1]*q[i+1][j][1] + q[i+1][j][2]*q[i+1][j][2])) +
+                q[i+1][j+1][3]*a[i+1][j+1]*cm2[i][j]*(3.5*q[i+1][j+1][0]/q[i+1][j+1][3] + 0.5*(q[i+1][j+1][1]*q[i+1][j+1][1] + q[i+1][j+1][2]*q[i+1][j+1][2])))*Jar[offset_i][offset_j];
+            }
+
+        }
+
+
+    }
+    /**************************************main iteration loop - ends ***************************/
 
 }
 
@@ -524,9 +761,9 @@ void domain::Set_indexes()
         row_points = floor(height/vert_proc);
         column_points = floor(width/horz_proc);
         grid_bottom.y = proc_row*row_points;
-        grid_top.y = grid_bottom.y + row_points - 1;
+        grid_top.y = grid_bottom.y + row_points;
         grid_bottom.x = proc_column *column_points;
-        grid_top.x = grid_bottom.x + column_points -1;
+        grid_top.x = grid_bottom.x + column_points;
         if(proc_row == vert_proc-1)
         {
             grid_top.y = height - 1;
@@ -535,7 +772,7 @@ void domain::Set_indexes()
         {
             grid_top.x = width -1;
         }
-//cout << "currnt process is " << current_rank << " with "<< grid_bottom.x << " " << grid_bottom.y << " "<< grid_top.x << " "<< grid_top.y << " " << endl;
+ ///cout << "currnt process is " << current_rank << " with "<< grid_bottom.x << " " << grid_bottom.y << " "<< grid_top.x << " "<< grid_top.y << " " << endl;
     }
     return;
 }
@@ -559,6 +796,12 @@ int main(int argc, char *argv[])
         domain params; // domain or process params
         params.Set_params(0,0,1,1);
         int total_proc = params.horz_proc * params.vert_proc + 1; // one to handle boundary and other is parent process
+
+        if (total_proc != size)
+        {
+            cout << "processes shoud be "<< total_proc << endl;
+            return 0;
+        }
         params.Load_grid("bumpgrid.txt");// laod grid
         params.Set_ranks(rank,size); // set ranks of surrounding processes
         params.Set_indexes(); // compute indexes of the process
@@ -577,10 +820,11 @@ int main(int argc, char *argv[])
         //params.Write_coord();
         for(int i =2; i < 10; i++)
         {
-          //  params.Send_to_surr(pow(rank,i));
+            //  params.Send_to_surr(pow(rank,i));
         }
         //cout << MPI::TAG_UB <<endl;
     }
+    // cout << "Process " << rank << " done and waiting!!" << endl;
     MPI::Finalize(); // end MPI
     return 0;
 }
