@@ -1,3 +1,8 @@
+/**
+  *
+  * parallel flow solver using MPI
+  * @authr R D Teja - rdarmateja@gmail.com
+  */
 #include <mpi.h>
 #include <algorithm>
 #include <iostream>
@@ -5,6 +10,19 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include <string>
+#include <sstream>
+
+/* patch to make to_string work */
+namespace patch
+{
+template < typename T > std::string to_string( const T& n )
+{
+    std::ostringstream stm ;
+    stm << n ;
+    return stm.str() ;
+}
+}
 
 #define dataType long double
 #define mpiDType MPI::LONG_DOUBLE
@@ -17,8 +35,8 @@
 using namespace std;
 
 
-/******************** supports start************************/
 
+/******************** supports start************************/
 struct  flow_variables
 {
     /* data */
@@ -29,6 +47,8 @@ struct  flow_variables
     dataType v;
     dataType w;
     dataType mach;
+    dataType R;//gas constant
+    dataType r;//gaama
 };
 
 struct grid_index
@@ -50,22 +70,22 @@ void swap (int *a, int *b)
 /*********************main class start*************************/
 class domain
 {
-//Main class for the process, it sets all the required parameters to work with
-// domain parameters, grid points, num of processes in horiz and vertical
+    ///Main class for the process, it sets all the required parameters to work with
+    /// domain parameters, grid nodes, num of processes in horiz and vertical
 public:
     int width; // horizontal grid points
     int height; // vertical grid points
     int horz_proc;// horizontal processes (cols)
     int vert_proc;// vertical processes (rows)
-//so total processes will be (h*v + 2)
+    ///so total processes will be (h*v + 2)
     int left_rank,top_rank,right_rank,bottom_rank,current_rank;//ranks of surrounding processes computed by Set_ranks
     grid_index grid_bottom,grid_top; //stores the index of the grid points that the process is operating on, computed by set_indexes
-// grid data X
+    /// grid data X
     std::vector <dataType> X;
     std::vector <dataType> Y;
-// flow prop
-    flow_variables init_flow;
-// prototype declarations
+    /// flow prop
+    flow_variables in_flow;
+    /// prototype declarations
     void Set_params(int a, int b, int c, int d);// set the parameters
     void Set_ranks(int rank,int size); // sets surrounding processes
     void Set_indexes(); // sets grid indexres
@@ -73,23 +93,139 @@ public:
     void Recv_message(dataType *A,int max_size, int source, int tag);
     void Send_to_surr(int n);
     void Send_to_surr2();
-    void Load_grid();
+    void Load_grid(std::string str);
+    void Run_vanleer();//van-leer scheme, 2d
+    void Write_coord(); // write coordinates to text file
     /*
     order of running
     1. Set_params()
     2. Load_grid()
     3. Set_ranks()
     4. Set_indexes()
-    5.
+    5. Run_vanleer()
     */
 };
 
+void domain::Run_vanleer()
+{
+    /// vanleer scheme
+    int imx = width, jmx = height;
 
-void domain::Load_grid()
+    /******************storing coordinates and computing areas, normals, volume start*********************/
+    dataType x_cord[imx][jmx],y_cord[imx][jmx];//x and y coordinates of grid
+    dataType Iar[imx][jmx],Jar[imx][jmx];//i-face and j-face areas
+    dataType In[imx][jmx][2],Jn[imx][jmx][2],l;// i,j face normals
+    dataType Vol[imx][jmx],lo,up;// volume of cells
+    /// Storing the coordinates
+    int buf =0;
+    for(int j=0 ; j<jmx ; j++)
+    {
+        for(int i=0 ; i<imx ; i++)
+        {
+            x_cord[i][j] = X[buf];
+            y_cord[i][j] = Y[buf];
+            buf++;
+        }
+    }
+    /// Calculating i face areas
+    for(int j=0; j<jmx-1; j++)
+    {
+        for(int i=0; i<imx; i++)
+        {
+            Iar[i][j+1] = sqrt(pow((x_cord[i][j+1] - x_cord[i][j]),2)+ pow((y_cord[i][j+1] - y_cord[i][j]),2));
+        }
+    }
+
+    /// Calculating j face areas
+    for(int j=0; j<jmx; j++)
+    {
+        for(int i=0; i<imx-1; i++)
+        {
+            Jar[i+1][j] = sqrt(pow((x_cord[i+1][j] - x_cord[i][j]),2)+ pow((y_cord[i+1][j] - y_cord[i][j]),2));
+        }
+    }
+    /// Calculating i face normals
+    for(int j=0; j<jmx-1; j++)
+    {
+        for(int i=0; i<imx; i++)
+        {
+            l = sqrt(pow((x_cord[i][j+1] - x_cord[i][j]),2)+ pow((y_cord[i][j+1] - y_cord[i][j]),2));
+            In[i][j+1][0] = (y_cord[i][j+1] - y_cord[i][j])/l; // x-component of i-face normal
+            In[i][j+1][1] = (-x_cord[i][j+1] + x_cord[i][j])/l; // y-component of i-face normal
+        }
+    }
+
+    /// Calculating j face normals
+    for(int j=0; j<jmx; j++)
+    {
+        for(int i=0; i<imx-1; i++)
+        {
+            l = sqrt(pow((x_cord[i+1][j] - x_cord[i][j]),2) + pow((y_cord[i+1][j] - y_cord[i][j]),2))	;
+            Jn[i+1][j][0] = (-y_cord[i+1][j] + y_cord[i][j])/l; // x-component of j-face normal
+            Jn[i+1][j][1] = (x_cord[i+1][j] - x_cord[i][j])/l; // y-component of j-face normal
+        }
+    }
+    /// Calculating cell volumes
+    for(int j=0; j<jmx-1; j++)
+    {
+        for(int i=0; i<imx-1; i++)
+        {
+            lo = 0.5*fabs((x_cord[i+1][j] - x_cord[i][j])*(y_cord[i+1][j+1] - y_cord[i+1][j]) - (x_cord[i+1][j+1] - x_cord[i+1][j])*(y_cord[i+1][j] - y_cord[i][j]));
+            up = 0.5*fabs((x_cord[i][j+1] - x_cord[i][j])*(y_cord[i+1][j+1] - y_cord[i][j+1]) - (x_cord[i+1][j+1] - x_cord[i][j+1])*(y_cord[i][j+1] - y_cord[i][j]));
+            Vol[i+1][j+1] = lo + up; // Volume of each cell
+        }
+    }
+
+    /******************storing coordinates and computing areas,normal,volumes end*********************/
+
+    /// inflow conditions
+    dataType pInf = in_flow.press,dInf = in_flow.dens, tInf = in_flow.temp;
+    dataType r = in_flow.r, R = in_flow.R;
+    dataType mInf = in_flow.mach,uInf = in_flow.u,vInf = in_flow.v,wInf = in_flow.w;
+
+}
+
+
+void domain::Write_coord()
+{
+    /// getting coordinates
+    int imx = width, jmx = height;
+    dataType x_cord[imx][jmx],y_cord[imx][jmx];//x and y coordinates of grid
+    int buf =0;
+    for(int j=0 ; j<jmx ; j++)
+    {
+        for(int i=0 ; i<imx ; i++)
+        {
+            x_cord[i][j] = X[buf];
+            y_cord[i][j] = Y[buf];
+            buf++;
+        }
+    }
+    /// writes process coordinates to a text file
+    string str = "txt/process_coord_" + patch::to_string(current_rank) + ".txt";
+    char *c = &str[0u];
+    std::fstream coord (c,fstream::out);
+    if(coord.is_open())
+    {
+        for(int j = grid_bottom.y; j <= grid_top.y; j++)
+        {
+            for(int i = grid_bottom.x; i <= grid_top.x; i++)
+            {
+                coord << x_cord[i][j] << " " << y_cord[i][j] << "\n";
+            }
+        }
+        coord.close();
+    }
+
+}
+
+
+void domain::Load_grid(std::string str)
 {
 // to load grid into an array
-    ifstream grid;
-    grid.open("bumpgrid.txt");
+    char *c = &str[0u];
+    std::ifstream grid;
+    grid.open(c);
     int imax,jmax;
     dataType a,b;
     grid >> imax >> jmax;
@@ -101,7 +237,7 @@ void domain::Load_grid()
         X.push_back(a);
         Y.push_back(b);
     }
-    cout << X[1] << endl;
+    grid.close();
 }
 
 
@@ -321,10 +457,12 @@ void domain::Set_ranks(int rank,int size)
         top_rank =0;
         bottom_rank =0;
     }
-    //else if(current_rank == 1){
-    // boundary process
-    // 	left_rank =1; right_rank =1; top_rank =1; bottom_rank =1;
-    //}
+    /*
+    else if(current_rank == 1){
+     boundary process
+     	left_rank =1; right_rank =1; top_rank =1; bottom_rank =1;
+    }
+    */
     else
     {
         // remaining other processes
@@ -353,7 +491,7 @@ void domain::Set_ranks(int rank,int size)
         }
 
     }
-    swap(&top_rank,&bottom_rank);
+    swap(&top_rank,&bottom_rank); // just a small manipulation
     //cout << "currnt process is " << current_rank << " with "<< left_rank << " " << top_rank << " " << right_rank << " " << bottom_rank << " " <<endl;
     return;
 }
@@ -371,10 +509,12 @@ void domain::Set_indexes()
         grid_top.x =0;
         grid_top.y=0;
     }
-    //else if(current_rank == 1){
-    // boundary process
-    // 	grid_bottom.x =1; grid_bottom.y =1; grid_top.x =1; grid_top.y=1;
-    //}
+    /*
+    else if(current_rank == 1){
+     boundary process
+     	grid_bottom.x =1; grid_bottom.y =1; grid_top.x =1; grid_top.y=1;
+    }
+    */
     else
     {
         // remaining other processes
@@ -407,24 +547,40 @@ class grid
 };
 
 
-
 int main(int argc, char *argv[])
 {
-    domain params; // domain or process params
-    params.Set_params(97,49,1,1);
-    int total_proc = params.horz_proc * params.vert_proc + 1; // one to handle boundary and other is parent process
+
     int rank,size;
     MPI::Init(); // initializing MPI
     size = MPI::COMM_WORLD.Get_size();
     rank = MPI::COMM_WORLD.Get_rank();
-    params.Load_grid();
-    params.Set_ranks(rank,size);
-    params.Set_indexes();
-    for(int i =2; i < 3; i++)
+    if(rank != 0)
     {
-//params.Send_to_surr(pow(rank,i));
+        domain params; // domain or process params
+        params.Set_params(0,0,1,1);
+        int total_proc = params.horz_proc * params.vert_proc + 1; // one to handle boundary and other is parent process
+        params.Load_grid("bumpgrid.txt");// laod grid
+        params.Set_ranks(rank,size); // set ranks of surrounding processes
+        params.Set_indexes(); // compute indexes of the process
+        /*set inflow conditions*/
+        params.in_flow.press = 1013.26;
+        params.in_flow.temp = 300;
+        params.in_flow.R = 287;
+        params.in_flow.r = 1.4;
+        params.in_flow.mach = 0.4;
+        params.in_flow.dens = params.in_flow.press/(params.in_flow.R*params.in_flow.temp);
+        params.in_flow.u = params.in_flow.mach*sqrt(params.in_flow.r*params.in_flow.press/params.in_flow.dens);
+        params.in_flow.v =0;
+        params.in_flow.w =0;
+        //cout << params.in_flow.dens << endl;
+        params.Run_vanleer();
+        //params.Write_coord();
+        for(int i =2; i < 10; i++)
+        {
+          //  params.Send_to_surr(pow(rank,i));
+        }
+        //cout << MPI::TAG_UB <<endl;
     }
-//cout << MPI::TAG_UB <<endl;
     MPI::Finalize(); // end MPI
     return 0;
 }
