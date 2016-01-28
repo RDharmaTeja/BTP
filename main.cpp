@@ -300,6 +300,18 @@ void domain::Run_vanleer()
     dataType a[imax+1][jmax+1];// sound speed
     /// fluxes
     dataType F[imax][jmax-1][4],G[imax-1][jmax][4];
+    /// residuals
+    dataType Res[imax+1][jmax+1][4];
+    /// time step
+    dataType cfl = 0.3;
+    dataType vnp1[imax][jmax-1],vnm1[imax][jmax-1],vnp2[imax-1][jmax],vnm2[imax-1][jmax];
+    dataType rp1[imax][jmax-1],rm1[imax][jmax-1],rp2[imax-1][jmax],rm2[imax-1][jmax];
+    dataType tvl[imax+1][jmax+1];
+    /// message passing variables - sends and receives  concatinated primitive variables
+    int left_len = (jmax+1)*4, top_len = (imax+1)*4;
+    dataType Left_send[left_len],Right_send[left_len],Left_recv[left_len],Right_recv[left_len];
+    dataType Top_send[top_len],Bottom_send[top_len],Top_recv[top_len],Bottom_recv[top_len];
+    int counter;
     int iters = 0;
     while(++iters <= 1)
     {
@@ -415,7 +427,272 @@ void domain::Run_vanleer()
             }
 
         }
+        /********************** wall no penetration boundary conditions on G flux - starts********************/
+        /// top wall
+        if(top_rank == -1)
+        {
+            for(int i = 0; i <  imax-1; i++)
+            {
+                offset_i = i+ grid_bottom.x;
+                offset_j = grid_bottom.y;
+                G[i][jmax-1][0] = 0;
+                G[i][jmax-1][3] = 0;
+                /*
+                    gFlux1(1:imax-1,jmax,2)= (dp2(1:imax-1,jmax).*q(2:imax,jmax+1,1)+dm2(1:imax-1,jmax).*q(2:imax,jmax+1,1)).*yarea(1:imax-1,jmax,1);
+                    gFlux1(1:imax-1,jmax,3)= (dp2(1:imax-1,jmax).*q(2:imax,jmax+1,1)+dm2(1:imax-1,jmax).*q(2:imax,jmax+1,1)).*yarea(1:imax-1,jmax,2);
+                */
+                G[i][jmax-1][1] = (dp2[i][jmax-1]*q[i+1][jmax][0] + dm2[i][jmax-1]*q[i+1][jmax][0])*Jn[offset_i][offset_j+jmax-1][0]*Jar[offset_i][offset_j+jmax-1];
+                G[i][jmax-1][2] = (dp2[i][jmax-1]*q[i+1][jmax][0] + dm2[i][jmax-1]*q[i+1][jmax][0])*Jn[offset_i][offset_j+jmax-1][1]*Jar[offset_i][offset_j+jmax-1];
+            }
+        }
+        if(bottom_rank == -1)
+        {
+            for(int i = 0; i <  imax-1; i++)
+            {
+                offset_i = i+ grid_bottom.x;
+                offset_j = grid_bottom.y;
+                G[i][0][0] = 0;
+                G[i][0][3] = 0;
+                /*
+                    gFlux1(1:imax-1,jmax,2)= (dp2(1:imax-1,jmax).*q(2:imax,jmax+1,1)+dm2(1:imax-1,jmax).*q(2:imax,jmax+1,1)).*yarea(1:imax-1,jmax,1);
+                    gFlux1(1:imax-1,jmax,3)= (dp2(1:imax-1,jmax).*q(2:imax,jmax+1,1)+dm2(1:imax-1,jmax).*q(2:imax,jmax+1,1)).*yarea(1:imax-1,jmax,2);
+                */
+                G[i][0][1] = (dp2[i][0]*q[i+1][1][0] + dm2[i][0]*q[i+1][1][0])*Jn[offset_i][offset_j][0]*Jar[offset_i][offset_j];
+                G[i][0][2] = (dp2[i][0]*q[i+1][1][0] + dm2[i][0]*q[i+1][1][0])*Jn[offset_i][offset_j][1]*Jar[offset_i][offset_j];
+            }
 
+        }
+        /********************** wall boundary conditions on G flux -  ends********************/
+
+        /***********************computing residuals -start ********************/
+        for(int j = 1; j < jmax; j++)
+        {
+            for(int i =1; i< imax ; i++)
+            {
+                Res[i][j][0] = F[i][j-1][0] - F[i-1][j-1][0] + G[i-1][j][0] - G[i-1][j-1][0];
+                Res[i][j][1] = F[i][j-1][1] - F[i-1][j-1][1] + G[i-1][j][1] - G[i-1][j-1][1];
+                Res[i][j][2] = F[i][j-1][2] - F[i-1][j-1][2] + G[i-1][j][2] - G[i-1][j-1][2];
+                Res[i][j][3] = F[i][j-1][3] - F[i-1][j-1][3] + G[i-1][j][3] - G[i-1][j-1][3];
+            }
+        }
+        /***********************computing residuals -stop ********************/
+
+        /************************Time step calculation - start****************/
+        /*
+        vnp1(1:imax,1:jmax-1) = q(1:imax,2:jmax,2).*xarean(1:imax,1:jmax-1,1)+ q(1:imax,2:jmax,3).*xarean(1:imax,1:jmax-1,2);
+        vnm1(1:imax,1:jmax-1) = q(2:imax+1,2:jmax,2).*xarean(1:imax,1:jmax-1,1)+ q(2:imax+1,2:jmax,3).*xarean(1:imax,1:jmax-1,2);
+        rp1 = abs(vnp1)+sqrt(rair*q(1:imax,2:jmax,1)./q(1:imax,2:jmax,4));
+        rm1 = abs(vnm1)+sqrt(rair*q(2:imax+1,2:jmax,1)./q(2:imax+1,2:jmax,4));
+        vnp2(1:imax-1,1:jmax) = q(2:imax,1:jmax,2).*yarean(1:imax-1,1:jmax,1)+ q(2:imax,1:jmax,3).*yarean(1:imax-1,1:jmax,2);
+        rp2= abs(vnp2)+sqrt(rair*q(2:imax,1:jmax,1)./q(2:imax,1:jmax,4));
+        vnm2(1:imax-1,1:jmax) = q(2:imax,2:jmax+1,2).*yarean(1:imax-1,1:jmax,1)+ q(2:imax,2:jmax+1,3).*yarean(1:imax-1,1:jmax,2);
+        rm2 = abs(vnm2)+sqrt(rair*q(2:imax,2:jmax+1,1)./q(2:imax,2:jmax+1,4));
+        */
+        for(int j =0; j< jmax-1; j++)
+        {
+            for(int i =0; i< imax; i++)
+            {
+                offset_i = i+grid_bottom.x;
+                offset_j = j+grid_bottom.y;
+                vnp1[i][j] = q[i][j+1][1]*In[offset_i][offset_j][0] + q[i][j+1][2]*In[offset_i][offset_j][1];
+                vnm1[i][j] = q[i+1][j+1][1]*In[offset_i][offset_j][0]+q[i+1][j+1][2]*In[offset_i][offset_j][1];
+                rp1[i][j] = abs(vnp1[i][j])+sqrt(r*q[i][j+1][0]/q[i][j+1][3]);
+                rm1[i][j] = abs(vnm1[i][j])+sqrt(r*q[i+1][j+1][0]/q[i+1][j+1][3]);
+            }
+        }
+
+        for(int j =0; j< jmax; j++)
+        {
+            for(int i =0; i< imax-1; i++)
+            {
+                offset_i = i+grid_bottom.x;
+                offset_j = j+grid_bottom.y;
+                vnp2[i][j] = q[i+1][j][1]*Jn[offset_i][offset_j][0] + q[i+1][j][2]*Jn[offset_i][offset_j][1];
+                vnm2[i][j] = q[i+1][j+1][1]*Jn[offset_i][offset_j][0]+q[i+1][j+1][2]*Jn[offset_i][offset_j][1];
+                rp2[i][j] = abs(vnp2[i][j])+sqrt(r*q[i+1][j][0]/q[i+1][j][3]);
+                rm2[i][j] = abs(vnm2[i][j])+sqrt(r*q[i+1][j+1][0]/q[i+1][j+1][3]);
+            }
+        }
+         /// time step calculation
+
+        /*
+
+
+    tlv(2:imax,2:jmax) = (2*cfl)./(xareamag(1:imax-1,1:jmax-1).*rm1(1:imax-1,1:jmax-1) + xareamag(2:imax,1:jmax-1).*rp1(2:imax,1:jmax-1)
+    +yareamag(1:imax-1,1:jmax-1).*rm2(1:imax-1,1:jmax-1)+yareamag(1:imax-1,2:jmax).*rp2(1:imax-1,2:jmax));
+
+        */
+        for(int j =1; j< jmax; j++ )
+        {
+            for(int i =1; i< imax; i++)
+            {
+                offset_i = i+grid_bottom.x-1;
+                offset_j = j+grid_bottom.y-1;
+                tvl[i][j] = (2*cfl)/(Iar[offset_i][offset_j]*rm1[i-1][j-1] + Iar[offset_i+1][offset_j]*rp1[i][j-1] +
+                Jar[offset_i][offset_j]*rm2[i-1][j-1] + Jar[offset_i][offset_j+1]*rp2[i-1][j]);
+            }
+        }
+        /************************Time step calculation - stop****************/
+        /**********************Updating conservative and primitive variable - start ************/
+        for (int j =1; j< jmax; j++)
+        {
+            for(int i =1; i< imax; i++)
+            {
+              ///conservative variables
+                U[i][j][0] = U[i][j][0] - tvl[i][j]*Res[i][j][0];
+                U[i][j][1] = U[i][j][1] - tvl[i][j]*Res[i][j][1];
+                U[i][j][2] = U[i][j][2] - tvl[i][j]*Res[i][j][2];
+                U[i][j][3] = U[i][j][3] - tvl[i][j]*Res[i][j][3];
+                /// primitive
+                q[i][j][3] = U[i][j][0];
+                q[i][j][1] = U[i][j][1]/U[i][j][0];
+                q[i][j][2] = U[i][j][2]/U[i][j][0];
+                // q(:,:,1) = (rair-1)*(U(:,:,4)-0.5*(U(:,:,2).^2+U(:,:,3).^2)./U(:,:,1));
+                q[i][j][0] = (r-1)*(U[i][j][3] - 0.5*(U[i][j][1]*U[i][j][1] + U[i][j][2]*U[i][j][2])/U[i][j][0]);
+            }
+        }
+        /**********************Updating conservative and primitive variable - stop ************/
+
+        /***********************Boundary conditions which includes MP - start **************/
+        /// left face - can be inflow or interface(no need to impose any conditions)
+        if(left_rank == -2)
+        {
+            /// subsonic
+            if(mInf < 1)
+            {
+                for(int j =0; j< jmax+1; j++)
+                {
+                    q[0][j][0] = q[1][j][0];// pressure is imposed from right
+                    q[0][j][1] = uInf;
+                    q[0][j][2] = vInf;
+                    q[0][j][3] = dInf;
+
+                    U[0][j][0] = q[0][j][3];
+                    U[0][j][1] = q[0][j][3]*q[0][j][1];
+                    U[0][j][2] = q[0][j][3]*q[0][j][2];
+                    //U(1,:,4) = (q(1,:,1)/(rair-1))+0.5*(q(1,:,4).*(q(1,:,2).^2+q(1,:,3).^2));
+                    U[0][j][3] = q[0][j][0]/(r-1) + 0.5*(q[0][j][3]*(q[0][j][1]*q[0][j][1] + q[0][j][2]*q[0][j][2])) ;
+                }
+            }
+            else
+            {
+            /// supersonic - implicitly satisfied as everything is initialized to infi values
+               for(int j =0; j< jmax+1; j++)
+                {
+                    q[0][j][0] = pInf;// pressure is imposed from right
+                    q[0][j][1] = uInf;
+                    q[0][j][2] = vInf;
+                    q[0][j][3] = dInf;
+
+                    U[0][j][0] = q[0][j][3];
+                    U[0][j][1] = q[0][j][3]*q[0][j][1];
+                    U[0][j][2] = q[0][j][3]*q[0][j][2];
+                    //U(1,:,4) = (q(1,:,1)/(rair-1))+0.5*(q(1,:,4).*(q(1,:,2).^2+q(1,:,3).^2));
+                    U[0][j][3] = q[0][j][0]/(r-1) + 0.5*(q[0][j][3]*(q[0][j][1]*q[0][j][1] + q[0][j][2]*q[0][j][2])) ;
+                }
+            }
+
+
+        }
+        else
+        {
+            /// message has to be passed and received
+            counter =0;
+            for(int k =0; k<4; k++)
+            {
+                for(int j =0; j< jmax+1; j++)
+                {
+                 Left_send[counter] = q[1][j][k];
+                    counter++;
+                }
+            }
+            /// send and then receive
+            mpiSend(Left_send,left_len,mpiDType,left_rank,1);
+            mpiRecv(Left_recv,left_len,mpiDType,left_rank,1);
+            /// update primitive and conservative
+            counter =0;
+            for(int k =0; k<4; k++)
+            {
+                for(int j =0; j< jmax+1; j++)
+                {
+                    q[0][j][k] = Left_recv[counter];
+                    counter++;
+                }
+            }
+            /// updating conservative variables
+            for(int j =0; j< jmax+1; j++)
+            {
+                U[0][j][0] = q[0][j][3];
+                U[0][j][1] = q[0][j][3]*q[0][j][1];
+                U[0][j][2] = q[0][j][3]*q[0][j][2];
+                //U(1,:,4) = (q(1,:,1)/(rair-1))+0.5*(q(1,:,4).*(q(1,:,2).^2+q(1,:,3).^2));
+                U[0][j][3] = q[0][j][0]/(r-1) + 0.5*(q[0][j][3]*(q[0][j][1]*q[0][j][1] + q[0][j][2]*q[0][j][2])) ;
+            }
+
+
+        }
+        /// top face - can be boundary or interface
+        if(top_rank == -1)
+        {
+            for(int i =0; i < imax+1; i++)
+            {
+                q[i][jmax][0] =  q[i][jmax-1][0];// pressure
+                q[i][jmax][3] =  q[i][jmax-1][3];// density
+            }
+
+        }
+
+        /// right face - can be outflow or interface
+        if(right_rank == -3)
+        {
+            /// subsonic
+            if(mInf < 1)
+            {
+                for(int j =0; j< jmax+1; j++)
+                {
+                    q[imax][j][0] = pInf;// pressure is imposed from right
+                    q[imax][j][1] = q[imax-1][j][1];
+                    q[imax][j][2] = q[imax-1][j][2];
+                    q[imax][j][3] = q[imax-1][j][3];
+
+                    U[imax][j][0] = q[imax][j][3];
+                    U[imax][j][1] = q[imax][j][3]*q[imax][j][1];
+                    U[imax][j][2] = q[imax][j][3]*q[imax][j][2];
+                    //U(1,:,4) = (q(1,:,1)/(rair-1))+0.5*(q(1,:,4).*(q(1,:,2).^2+q(1,:,3).^2));
+                    U[imax][j][3] = q[imax][j][0]/(r-1) + 0.5*(q[imax][j][3]*(q[imax][j][1]*q[imax][j][1] + q[imax][j][2]*q[imax][j][2])) ;
+                }
+            }
+            else
+            {
+                /// supersonic - implicitly satisfied as everything is initialized to infi values
+                for(int j =0; j< jmax+1; j++)
+                {
+                    q[imax][j][0] = q[imax-1][j][0];
+                    q[imax][j][1] = q[imax-1][j][1];
+                    q[imax][j][2] = q[imax-1][j][2];
+                    q[imax][j][3] = q[imax-1][j][3];
+
+                    U[imax][j][0] = q[imax][j][3];
+                    U[imax][j][1] = q[imax][j][3]*q[imax][j][1];
+                    U[imax][j][2] = q[imax][j][3]*q[imax][j][2];
+                    //U(1,:,4) = (q(1,:,1)/(rair-1))+0.5*(q(1,:,4).*(q(1,:,2).^2+q(1,:,3).^2));
+                    U[imax][j][3] = q[imax][j][0]/(r-1) + 0.5*(q[imax][j][3]*(q[imax][j][1]*q[imax][j][1] + q[imax][j][2]*q[imax][j][2])) ;
+                }
+            }
+
+
+        }
+        /// bottom face - can be boundary or interface
+        if(bottom_rank == -1)
+        {
+            for(int i =0; i < imax+1; i++)
+            {
+                q[i][0][0] =  q[i][1][0];// pressure
+                q[i][0][3] =  q[i][1][3];// density
+            }
+        }
+
+        /***********************Boundary conditions which includes MP - stop **************/
 
     }
     /**************************************main iteration loop - ends ***************************/
