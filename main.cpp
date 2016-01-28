@@ -59,6 +59,8 @@ using namespace std;
 struct  flow_variables
 {
     /* data */
+    int iterations;
+    dataType cfl;
     dataType press;
     dataType dens;
     dataType temp;
@@ -303,7 +305,7 @@ void domain::Run_vanleer()
     /// residuals
     dataType Res[imax+1][jmax+1][4];
     /// time step
-    dataType cfl = 0.3;
+    dataType cfl = in_flow.cfl;
     dataType vnp1[imax][jmax-1],vnm1[imax][jmax-1],vnp2[imax-1][jmax],vnm2[imax-1][jmax];
     dataType rp1[imax][jmax-1],rm1[imax][jmax-1],rp2[imax-1][jmax],rm2[imax-1][jmax];
     dataType tvl[imax+1][jmax+1];
@@ -313,8 +315,11 @@ void domain::Run_vanleer()
     dataType Top_send[top_len],Bottom_send[top_len],Top_recv[top_len],Bottom_recv[top_len];
     int counter;
     int iters = 0;
-    while(++iters <= 1)
+    /// resnorm
+    dataType resNorm[in_flow.iterations];
+    while(++iters <= in_flow.iterations)
     {
+        resNorm[iters-1] =0;
         ///cout << "teja" << endl;
         /// sound speed
         for(int i =0; i< imax+1; i++)
@@ -325,7 +330,7 @@ void domain::Run_vanleer()
                 a[i][j] = sqrt(r*q[i][j][0]/q[i][j][3]);
         }
         }
-        cout << dInf << endl;
+        //cout << dInf << endl;
         /// mach, alpha , beta, c, d for i faces
         int offset_i, offset_j;
         for(int j =0; j< jmax-1; j++)
@@ -473,8 +478,10 @@ void domain::Run_vanleer()
                 Res[i][j][1] = F[i][j-1][1] - F[i-1][j-1][1] + G[i-1][j][1] - G[i-1][j-1][1];
                 Res[i][j][2] = F[i][j-1][2] - F[i-1][j-1][2] + G[i-1][j][2] - G[i-1][j-1][2];
                 Res[i][j][3] = F[i][j-1][3] - F[i-1][j-1][3] + G[i-1][j][3] - G[i-1][j-1][3];
+                resNorm[iters-1] += Res[i][j][0]*Res[i][j][0] + Res[i][j][1]*Res[i][j][1] +Res[i][j][2]*Res[i][j][2]+Res[i][j][3]*Res[i][j][3];
             }
         }
+        resNorm[iters-1] = sqrt(resNorm[iters-1]);
         /***********************computing residuals -stop ********************/
 
         /************************Time step calculation - start****************/
@@ -554,7 +561,8 @@ void domain::Run_vanleer()
         /**********************Updating conservative and primitive variable - stop ************/
 
         /***********************Boundary conditions which includes MP - start **************/
-        /// left face - can be inflow or interface(no need to impose any conditions)
+
+        /// *************************left face - can be inflow or interface*********************
         if(left_rank == -2)
         {
             /// subsonic
@@ -631,18 +639,72 @@ void domain::Run_vanleer()
 
 
         }
-        /// top face - can be boundary or interface
+        /// **********************top face - can be boundary or interface*********************************************
         if(top_rank == -1)
         {
+            // flow tangency
+            for(int i =0; i<imax-1; i++)
+            {
+                offset_i = i +grid_bottom.x;
+                offset_j = jmax-1;
+                q[i+1][jmax][1] = q[i+1][jmax-1][1] - (2* (q[i+1][jmax-1][1]*Jn[offset_i][offset_j][0] + q[i+1][jmax-1][2]*Jn[offset_i][offset_j][1]))*Jn[offset_i][offset_j][0];
+                q[i+1][jmax][2] = q[i+1][jmax-1][2] - (2* (q[i+1][jmax-1][1]*Jn[offset_i][offset_j][0] + q[i+1][jmax-1][2]*Jn[offset_i][offset_j][1]))*Jn[offset_i][offset_j][1];
+            }
+
             for(int i =0; i < imax+1; i++)
             {
                 q[i][jmax][0] =  q[i][jmax-1][0];// pressure
                 q[i][jmax][3] =  q[i][jmax-1][3];// density
+                /*
+                    q(2:imax,jmax+1,2) = q(2:imax,jmax,2) - (2*(q(2:imax,jmax,2).*yarean(1:imax-1,jmax,1)+q(2:imax,jmax,3).*yarean(1:imax-1,jmax,2))).*yarean(1:imax-1,jmax,1);
+                    q(2:imax,jmax+1,3) = q(2:imax,jmax,3) - (2*(q(2:imax,jmax,2).*yarean(1:imax-1,jmax,1)+q(2:imax,jmax,3).*yarean(1:imax-1,jmax,2))).*yarean(1:imax-1,jmax,2);
+                */
+                //q[i+1][jmax][1] = q[i+1][jmax-1][1] - (2*(q[i+1][jmax-1][1])*Jn[][jmax-1])
+                U[i][jmax][0] = q[i][jmax][3];
+                U[i][jmax][1] =  q[i][jmax][3]*q[i][jmax][1];
+                U[i][jmax][2] =  q[i][jmax][3]*q[i][jmax][2];
+                U[i][jmax][3] = q[i][jmax][0]/(r-1) + 0.5*(q[i][jmax][3]*(q[i][jmax][1]*q[i][jmax][1] + q[i][jmax][2]*q[i][jmax][2]));
             }
 
         }
+        else
+        {
+        // message passing
+        counter = 0;
+        for(int k =0; k<4; k++)
+            {
+                for(int i =0; i< imax+1; i++)
+                {
+                 Top_send[counter] = q[i][jmax-1][k];
+                    counter++;
+                }
+            }
+            /// send and then receive
+            mpiSend(Top_send,top_len,mpiDType,top_rank,1);
+            mpiRecv(Top_recv,top_len,mpiDType,top_rank,1);
+            /// update primitive and conservative
+            counter =0;
+            for(int k =0; k<4; k++)
+            {
+                for(int i =0; i< imax+1; i++)
+                {
+                    q[i][jmax][k] = Top_recv[counter];
+                    counter++;
+                }
+             }
+            /// updating conservative variables
+           for(int i =0; i < imax+1; i++)
+            {
+                U[i][jmax][0] = q[i][jmax][3];
+                U[i][jmax][1] =  q[i][jmax][3]*q[i][jmax][1];
+                U[i][jmax][2] =  q[i][jmax][3]*q[i][jmax][2];
+                U[i][jmax][3] = q[i][jmax][0]/(r-1) + 0.5*(q[i][jmax][3]*(q[i][jmax][1]*q[i][jmax][1] + q[i][jmax][2]*q[i][jmax][2]));
+            }
 
-        /// right face - can be outflow or interface
+
+        }
+
+        /// *******************************right face - can be outflow or interface****************************************
         if(right_rank == -3)
         {
             /// subsonic
@@ -679,23 +741,145 @@ void domain::Run_vanleer()
                     U[imax][j][3] = q[imax][j][0]/(r-1) + 0.5*(q[imax][j][3]*(q[imax][j][1]*q[imax][j][1] + q[imax][j][2]*q[imax][j][2])) ;
                 }
             }
-
+        }
+        else
+        {
+          /// message has to be passed and received
+            counter =0;
+            for(int k =0; k<4; k++)
+            {
+                for(int j =0; j< jmax+1; j++)
+                {
+                 Right_send[counter] = q[imax-1][j][k];
+                    counter++;
+                }
+            }
+            /// receive and then send
+            mpiRecv(Right_recv,left_len,mpiDType,right_rank,1);
+            mpiSend(Right_send,left_len,mpiDType,right_rank,1);
+            /// update primitive and conservative
+            counter =0;
+            for(int k =0; k<4; k++)
+            {
+                for(int j =0; j< jmax+1; j++)
+                {
+                    q[imax][j][k] = Right_recv[counter];
+                    counter++;
+                }
+             }
+            /// updating conservative variables
+            for(int j =0; j< jmax+1; j++)
+            {
+                U[imax][j][0] = q[imax][j][3];
+                U[imax][j][1] = q[imax][j][3]*q[imax][j][1];
+                U[imax][j][2] = q[imax][j][3]*q[imax][j][2];
+                //U(1,:,4) = (q(1,:,1)/(rair-1))+0.5*(q(1,:,4).*(q(1,:,2).^2+q(1,:,3).^2));
+                U[imax][j][3] = q[imax][j][0]/(r-1) + 0.5*(q[imax][j][3]*(q[imax][j][1]*q[imax][j][1] + q[imax][j][2]*q[imax][j][2])) ;
+            }
 
         }
-        /// bottom face - can be boundary or interface
+        /// ***************************bottom face - can be boundary or interface*************************************
         if(bottom_rank == -1)
         {
+            // flow tangency
+            for(int i =0; i<imax-1; i++)
+            {
+                offset_i = i +grid_bottom.x;
+                offset_j = 0;
+                q[i+1][0][1] = q[i+1][1][1] - (2* (q[i+1][1][1]*Jn[offset_i][offset_j][0] + q[i+1][1][2]*Jn[offset_i][offset_j][1]))*Jn[offset_i][offset_j][0];
+                q[i+1][0][2] = q[i+1][1][2] - (2* (q[i+1][1][1]*Jn[offset_i][offset_j][0] + q[i+1][1][2]*Jn[offset_i][offset_j][1]))*Jn[offset_i][offset_j][1];
+            }
+
             for(int i =0; i < imax+1; i++)
             {
                 q[i][0][0] =  q[i][1][0];// pressure
                 q[i][0][3] =  q[i][1][3];// density
+                U[i][0][0] = q[i][0][3];
+                U[i][0][1] =  q[i][0][3]*q[i][0][1];
+                U[i][0][2] =  q[i][0][3]*q[i][0][2];
+                U[i][0][3] = q[i][0][0]/(r-1) + 0.5*(q[i][0][3]*(q[i][0][1]*q[i][0][1] + q[i][0][2]*q[i][0][2]));
             }
+        }
+        else
+        {
+            // message passing
+            counter = 0;
+            for(int k =0; k<4; k++)
+            {
+                for(int i =0; i< imax+1; i++)
+                {
+                    Bottom_send[counter] = q[i][1][k];
+                    counter++;
+                }
+            }
+            /// receive and send
+            mpiRecv(Bottom_recv,top_len,mpiDType,bottom_rank,1);
+            mpiSend(Bottom_send,top_len,mpiDType,bottom_rank,1);
+            /// update primitive and conservative
+            counter =0;
+            for(int k =0; k<4; k++)
+            {
+                for(int i =0; i< imax+1; i++)
+                {
+                    q[i][0][k] = Bottom_recv[counter];
+                    counter++;
+                }
+            }
+            /// updating conservative variables
+            for(int i =0; i < imax+1; i++)
+            {
+                U[i][0][0] = q[i][0][3];
+                U[i][0][1] =  q[i][0][3]*q[i][0][1];
+                U[i][0][2] =  q[i][0][3]*q[i][0][2];
+                U[i][0][3] = q[i][0][0]/(r-1) + 0.5*(q[i][0][3]*(q[i][0][1]*q[i][0][1] + q[i][0][2]*q[i][0][2]));
+            }
+            //cout << "teja" << endl;
+
         }
 
         /***********************Boundary conditions which includes MP - stop **************/
 
     }
     /**************************************main iteration loop - ends ***************************/
+
+    /**************************************storing data into text - starts***************************/
+    dataType qNodes[imax][jmax][4];
+    for(int j =0; j < jmax; j++)
+    {
+        for(int i =0; i< imax; i++)
+        {
+            for(int k =0; k< 4; k++)
+                qNodes[i][j][k] = 0.25*(q[i][j][k] + q[i+1][j][k] + q[i][j+1][k] + q[i+1][j+1][k]);
+        }
+    }
+    string str = "txt/pressure_" + patch::to_string(current_rank) + ".txt";
+    char *c = &str[0u];
+    std::fstream coord (c,fstream::out);
+    if(coord.is_open())
+    {
+        for(int j = 0; j < jmax; j++)
+        {
+            for(int i = 0 ; i < imax; i++)
+            {
+                coord << qNodes[i][j][0] <<"  ";
+            }
+            coord << "\n";
+        }
+        coord.close();
+    }
+    //resnorm
+    str = "txt/resnorm_" + patch::to_string(current_rank) + ".txt";
+    c = &str[0u];
+    std::fstream coord2 (c,fstream::out);
+    if(coord2.is_open()){
+    for(int i =0; i < in_flow.iterations;i++)
+    {
+    coord2 << resNorm[i] << " \n";
+
+    }
+    coord2.close();
+    }
+    /**************************************storing data into text - ends***************************/
 
 }
 
@@ -716,19 +900,25 @@ void domain::Write_coord()
         }
     }
     /// writes process coordinates to a text file
-    string str = "txt/process_coord_" + patch::to_string(current_rank) + ".txt";
-    char *c = &str[0u];
-    std::fstream coord (c,fstream::out);
-    if(coord.is_open())
+    string strx = "txt/process_xcoord_" + patch::to_string(current_rank) + ".txt";
+    string stry = "txt/process_ycoord_" + patch::to_string(current_rank) + ".txt";
+    char *cx = &strx[0u];char *cy = &stry[0u];
+    std::fstream coordx (cx,fstream::out);
+    std::fstream coordy (cy,fstream::out);
+    if(coordx.is_open() && coordy.is_open() )
     {
         for(int j = grid_bottom.y; j <= grid_top.y; j++)
         {
             for(int i = grid_bottom.x; i <= grid_top.x; i++)
             {
-                coord << x_cord[i][j] << " " << y_cord[i][j] << "\n";
+                coordx << x_cord[i][j] << "  ";
+                coordy << y_cord[i][j] << "  ";
             }
+            coordx << "\n";
+            coordy << "\n";
         }
-        coord.close();
+        coordx.close();
+        coordy.close();
     }
 
 }
@@ -1071,7 +1261,7 @@ int main(int argc, char *argv[])
     if(rank != 0)
     {
         domain params; // domain or process params
-        params.Set_params(0,0,1,1);
+        params.Set_params(0,0,3,1);
         int total_proc = params.horz_proc * params.vert_proc + 1; // one to handle boundary and other is parent process
 
         if (total_proc != size)
@@ -1083,22 +1273,20 @@ int main(int argc, char *argv[])
         params.Set_ranks(rank,size); // set ranks of surrounding processes
         params.Set_indexes(); // compute indexes of the process
         /*set inflow conditions*/
+        params.in_flow.iterations = 10000;
+        params.in_flow.cfl = 0.3;
         params.in_flow.press = 1013.26;
         params.in_flow.temp = 300;
         params.in_flow.R = 287;
         params.in_flow.r = 1.4;
-        params.in_flow.mach = 0.4;
+        params.in_flow.mach = 0.8;
         params.in_flow.dens = params.in_flow.press/(params.in_flow.R*params.in_flow.temp);
         params.in_flow.u = params.in_flow.mach*sqrt(params.in_flow.r*params.in_flow.press/params.in_flow.dens);
         params.in_flow.v =0;
         params.in_flow.w =0;
         //cout << params.in_flow.dens << endl;
         params.Run_vanleer();
-        //params.Write_coord();
-        for(int i =2; i < 10; i++)
-        {
-            //  params.Send_to_surr(pow(rank,i));
-        }
+        params.Write_coord();
         //cout << MPI::TAG_UB <<endl;
     }
     // cout << "Process " << rank << " done and waiting!!" << endl;
