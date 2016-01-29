@@ -1261,7 +1261,7 @@ int main(int argc, char *argv[])
     if(rank != 0)
     {
         domain params; // domain or process params
-        params.Set_params(0,0,3,1);
+        params.Set_params(0,0,2,2);
         int total_proc = params.horz_proc * params.vert_proc + 1; // one to handle boundary and other is parent process
 
         if (total_proc != size)
@@ -1273,13 +1273,13 @@ int main(int argc, char *argv[])
         params.Set_ranks(rank,size); // set ranks of surrounding processes
         params.Set_indexes(); // compute indexes of the process
         /*set inflow conditions*/
-        params.in_flow.iterations = 10000;
+        params.in_flow.iterations = 20000;
         params.in_flow.cfl = 0.3;
         params.in_flow.press = 1013.26;
         params.in_flow.temp = 300;
         params.in_flow.R = 287;
         params.in_flow.r = 1.4;
-        params.in_flow.mach = 0.8;
+        params.in_flow.mach = 1.4;
         params.in_flow.dens = params.in_flow.press/(params.in_flow.R*params.in_flow.temp);
         params.in_flow.u = params.in_flow.mach*sqrt(params.in_flow.r*params.in_flow.press/params.in_flow.dens);
         params.in_flow.v =0;
@@ -1289,7 +1289,7 @@ int main(int argc, char *argv[])
         params.Write_coord();
         //cout << MPI::TAG_UB <<endl;
     }
-    // cout << "Process " << rank << " done and waiting!!" << endl;
+   // cout << "Process " << rank << " done and waiting!!" << endl;
     MPI::Finalize(); // end MPI
     return 0;
 }
